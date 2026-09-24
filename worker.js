@@ -314,6 +314,13 @@ async function ownerAudit(env, chatId) {
   return send(env, chatId, `📜 <b>AUDIT LOGS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.created_at}  ${x.actor_telegram_id}  ${x.action}  ${x.result}`).join("\n") || "No audit events")}</pre>`, ownerMenu);
 }
 
+async function ownerUsers(env, chatId) {
+  const result = await all(env, `SELECT telegram_id, username, status, active FROM users ORDER BY created_at DESC LIMIT 50`);
+  const rows = result.results || [];
+  const buttons = rows.filter((x) => x.role !== "owner" && x.status === "pending").map((x) => [callback(`✅ Accept ${x.username ? `@${x.username}` : x.telegram_id}`, `user:accept:${x.telegram_id}`), callback("❌ Reject", `user:reject:${x.telegram_id}`)]);
+  return send(env, chatId, `👥 <b>USERS</b>\n\n<pre>${html(rows.map((x) => `${x.telegram_id}  ${x.status}  @${x.username || "-"}`).join("\n") || "No users")}</pre>`, buttons.length ? inline(buttons) : ownerMenu);
+}
+
 async function ownerApprove(env, ownerId, targetId) {
   const target = await getUser(env, targetId);
   if (!target) return send(env, ownerId, `❌ User ${html(targetId)} was not found.`, ownerMenu);
@@ -505,10 +512,7 @@ async function handleMessage(env, message) {
   if (user.role === "owner" && text.startsWith("/reject ")) return ownerReject(env, chatId, text.split(/\s+/)[1]);
   if (user.role === "owner" && text.startsWith("/package_delete ")) return ownerPackageDelete(env, chatId, text.split(/\s+/)[1]);
   if (user.role === "owner" && text.startsWith("/package ")) return ownerPackageEdit(env, chatId, text.split(/\s+/).slice(1));
-  if (user.role === "owner" && text === "/users") {
-    const result = await all(env, `SELECT telegram_id, username, status, active FROM users ORDER BY created_at DESC LIMIT 50`);
-    return send(env, chatId, `👥 <b>USERS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.telegram_id}  ${x.status}  @${x.username || "-"}`).join("\n") || "No users")}</pre>`, ownerMenu);
-  }
+  if (user.role === "owner" && text === "/users") return ownerUsers(env, chatId);
   if (user.role === "owner" && text === "/audit") return ownerAudit(env, chatId);
   if (text === "/start" || text === "/menu") {
     if (user.role === "owner") return send(env, chatId, ownerDashboard(), ownerMenu);
@@ -527,10 +531,7 @@ async function handleMessage(env, message) {
   if (text === "🔑 HopX Key") return send(env, chatId, "🔑 Press the button below and send your complete HopX key in this private chat.", inline([[callback("🔑 Connect HopX API Key", "key:prompt")]]));
   if (text === "📦 Deploy Project") return send(env, chatId, "📦 <b>PROJECT DEPLOYMENT</b>\n\nUse the Telegram Mini App for drag-and-drop upload, or send a ZIP document directly in this chat.", inline([[webAppButton("📤 Open Drag-and-Drop Panel", "https://akashvps-admin-bot.axura.workers.dev/app")]]));
   if (text === "⌨️ Terminal") return send(env, chatId, "⌨️ Select your VPS first, then open its secure terminal session.", mainMenu);
-  if (user.role === "owner" && text === "👥 Users") {
-    const result = await all(env, `SELECT telegram_id, username, status, active FROM users ORDER BY created_at DESC LIMIT 20`);
-    return send(env, chatId, `👥 <b>USERS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.telegram_id}  ${x.status}  @${x.username || "-"}`).join("\n") || "No users")}</pre>`, ownerMenu);
-  }
+  if (user.role === "owner" && text === "👥 Users") return ownerUsers(env, chatId);
   if (user.role === "owner" && text === "📦 Packages") return showPackages(env, chatId);
   if (user.role === "owner" && text === "🖥 All VPS") {
     const result = await all(env, `SELECT sandbox_id, owner_telegram_id, status, service_url FROM sandboxes ORDER BY created_at DESC LIMIT 20`);
