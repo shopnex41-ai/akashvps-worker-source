@@ -65,7 +65,9 @@ async function tg(env, method, payload) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload)
   });
-  return response.json();
+  const data = await response.json();
+  if (!data.ok) console.error("telegram_api_error", method, data.description || "unknown");
+  return data;
 }
 
 async function send(env, chatId, text, replyMarkup, extra = {}) {
@@ -237,7 +239,7 @@ async function connectKey(env, user, key, messageId) {
   await audit(env, user.telegram_id, "hopx_key_connected", "validated");
   if (messageId) await deleteMessage(env, user.telegram_id, messageId);
   const resources = sandboxes.find((x) => x.resources)?.resources || {};
-  return send(env, user.telegram_id, `✅ <b>HOPX ACCOUNT CONNECTED</b>\n\n${table("REAL PROVIDER SCAN", [["Provider", "HopX"], ["Key", fingerprint], ["Status", "VERIFIED"], ["Organization", organization || "provider"], ["Sandboxes", sandboxes.length], ["vCPU", resources.vcpu || "provider"], ["Memory", resources.memory_mb ? `${resources.memory_mb} MB` : "provider"], ["Disk", resources.disk_mb ? `${resources.disk_mb} MB` : "provider"]])}\n\nThe displayed account data comes from the real HopX API response.`, mainMenu);
+  return send(env, user.telegram_id, `✅ <b>HOPX ACCOUNT CONNECTED</b>\n\n${table("REAL PROVIDER SCAN", [["Provider", "HopX"], ["Key", fingerprint], ["Status", "VERIFIED"], ["Organization", organization || "provider"], ["Sandboxes", sandboxes.length], ["vCPU", resources.vcpu || "provider"], ["Memory", resources.memory_mb ? `${resources.memory_mb} MB` : "provider"], ["Disk", resources.disk_mb ? `${resources.disk_mb} MB` : "provider"]])}\n\nThe displayed account data comes from the real HopX API response.`, user.role === "owner" ? ownerMenu : mainMenu);
 }
 
 async function createSandbox(env, user) {
