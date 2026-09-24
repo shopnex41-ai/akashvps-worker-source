@@ -16,9 +16,12 @@ const mainMenu = {
 
 const ownerMenu = {
   keyboard: [
-    ["👥 Users", "📦 Packages"],
+    ["👥 Users", "📨 Pending Users"],
+    ["📦 Packages", "✏️ Edit Package"],
     ["🖥 All VPS", "🔑 HopX Keys"],
-    ["📊 Usage", "📜 Audit Logs"]
+    ["✅ Activate Package", "❌ Reject User"],
+    ["📊 Usage", "📜 Audit Logs"],
+    ["🧪 System Status", "🆘 Owner Help"]
   ],
   resize_keyboard: true,
   is_persistent: true
@@ -227,7 +230,7 @@ async function connectKey(env, user, key, messageId) {
   const version = Number(previous?.v || 0) + 1;
   await db(env, `UPDATE provider_credentials SET status='revoked', updated_at=? WHERE user_id=? AND status='active'`, now(), user.telegram_id);
   const organization = sandboxes.find((x) => x.organization_id)?.organization_id || validation?.organization_id || null;
-  await db(env, `INSERT INTO provider_credentials(user_id, provider, key_version, key_ciphertext, key_fingerprint, organization_ref, status, last_validated_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, user.telegram_id, "hopx", version, encrypted, fingerprint, organization, "active", now(), now(), now());
+  await db(env, `INSERT INTO provider_credentials(user_id, provider, key_version, key_ciphertext, key_fingerprint, organization_ref, status, last_validated_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, user.telegram_id, "hopx", version, encrypted, fingerprint, organization, "active", now(), now(), now());
   await audit(env, user.telegram_id, "hopx_key_connected", "validated");
   if (messageId) await deleteMessage(env, user.telegram_id, messageId);
   const resources = sandboxes.find((x) => x.resources)?.resources || {};
@@ -538,13 +541,25 @@ async function handleMessage(env, message) {
   if (text === "📦 Deploy Project") return send(env, chatId, "📦 <b>PROJECT DEPLOYMENT</b>\n\nUse the Telegram Mini App for drag-and-drop upload, or send a ZIP document directly in this chat.", inline([[webAppButton("📤 Open Drag-and-Drop Panel", "https://akashvps-admin-bot.axura.workers.dev/app")]]));
   if (text === "⌨️ Terminal") return send(env, chatId, "⌨️ Select your VPS first, then open its secure terminal session.", mainMenu);
   if (user.role === "owner" && text === "👥 Users") return ownerUsers(env, chatId);
+  if (user.role === "owner" && text === "📨 Pending Users") return ownerUsers(env, chatId);
   if (user.role === "owner" && text === "📦 Packages") return showPackages(env, chatId);
+  if (user.role === "owner" && text === "✏️ Edit Package") return send(env, chatId, "✏️ Edit a live package with:\n/package <id> <max_files> <upload_mb> <cpu_policy>\n\nExample: /package 1 50 50 provider-default", ownerMenu);
   if (user.role === "owner" && text === "🖥 All VPS") {
     const result = await all(env, `SELECT sandbox_id, owner_telegram_id, status, service_url FROM sandboxes ORDER BY created_at DESC LIMIT 20`);
     return send(env, chatId, `🖥 <b>ALL VPS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.sandbox_id}  ${x.owner_telegram_id}  ${x.status}`).join("\n") || "No VPS")}</pre>`, ownerMenu);
   }
   if (user.role === "owner" && text === "🔑 HopX Keys") return ownerKeys(env, chatId);
+  if (user.role === "owner" && text === "✅ Activate Package") return send(env, chatId, "✅ Activate with:\n/activate <telegram_user_id> <package_id>\n\nExample: /activate 8519899488 1", ownerMenu);
+  if (user.role === "owner" && text === "❌ Reject User") return send(env, chatId, "❌ Reject with:\n/reject <telegram_user_id>\n\nExample: /reject 8519899488", ownerMenu);
   if (user.role === "owner" && text === "📜 Audit Logs") return ownerAudit(env, chatId);
+  if (user.role === "owner" && text === "🧪 System Status") {
+    const users = await first(env, `SELECT COUNT(*) AS n FROM users`);
+    const pending = await first(env, `SELECT COUNT(*) AS n FROM users WHERE status='pending'`);
+    const packages = await first(env, `SELECT COUNT(*) AS n FROM packages WHERE status='active'`);
+    const logs = await first(env, `SELECT COUNT(*) AS n FROM audit_logs`);
+    return send(env, chatId, `🧪 <b>LIVE SYSTEM STATUS</b>\n\n${table("CONTROL PLANE", [["Worker", "ONLINE"], ["D1 users", users?.n || 0], ["Pending users", pending?.n || 0], ["Active packages", packages?.n || 0], ["Audit entries", logs?.n || 0], ["Webhook", "CONFIGURED"]])}`, ownerMenu);
+  }
+  if (user.role === "owner" && text === "🆘 Owner Help") return send(env, chatId, "🆘 <b>OWNER COMMANDS</b>\n\n/users — list and approve users\n/approve <id> — accept user\n/reject <id> — reject user\n/activate <user_id> <package_id> — assign package\n/package <id> <files> <upload_mb> <cpu> — edit package\n/package_delete <id> — deactivate package\n/audit — real audit log", ownerMenu);
   return send(env, chatId, "Use the menu to continue.", user.role === "owner" ? ownerMenu : mainMenu);
 }
 
