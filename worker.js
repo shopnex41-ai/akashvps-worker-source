@@ -510,6 +510,12 @@ async function handleMessage(env, message) {
   }
   if (user.role === "owner" && text.startsWith("/approve ")) return ownerApprove(env, chatId, text.split(/\s+/)[1]);
   if (user.role === "owner" && text.startsWith("/reject ")) return ownerReject(env, chatId, text.split(/\s+/)[1]);
+  if (user.role === "owner" && text.startsWith("/activate ")) {
+    const [, target, packageId] = text.split(/\s+/);
+    if (!target || !packageId) return send(env, chatId, "Usage: /activate <telegram_user_id> <package_id>", ownerMenu);
+    await activateUser(env, target, Number(packageId), chatId);
+    return send(env, chatId, `✅ Package ${html(packageId)} activated for ${html(target)}.`, ownerMenu);
+  }
   if (user.role === "owner" && text.startsWith("/package_delete ")) return ownerPackageDelete(env, chatId, text.split(/\s+/)[1]);
   if (user.role === "owner" && text.startsWith("/package ")) return ownerPackageEdit(env, chatId, text.split(/\s+/).slice(1));
   if (user.role === "owner" && text === "/users") return ownerUsers(env, chatId);
