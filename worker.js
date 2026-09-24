@@ -395,6 +395,65 @@ async function usage(env, user) {
   return send(env, user.telegram_id, `📊 <b>YOUR USAGE</b>\n\n${table("USAGE", [["Package", pkg?.name || "none"], ["Active VPS", `${active?.n || 0} / ${pkg?.max_active_sandboxes || 0}`], ["Files/project", pkg?.max_files_per_project || 0], ["Max upload", `${Math.round((pkg?.max_upload_bytes || 0) / 1024 / 1024)} MB`], ["CPU", pkg?.cpu_policy || "provider"]])}`, mainMenu);
 }
 
+async function verifyWebApp(env, request) {
+  const raw = request.headers.get("X-Telegram-Init-Data") || "";
+  if (!raw || !env.BOT_TOKEN) throw new Error("Telegram WebApp authentication is required");
+  const params = new URLSearchParams(raw);
+  const received = params.get("hash");
+  params.delete("hash");
+  const check = [...params.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join("\n");
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode("WebAppData"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const secret = await crypto.subtle.sign("HMAC", base, new TextEncoder().encode(env.BOT_TOKEN));
+  const key = await crypto.subtle.importKey("raw", secret, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(check));
+  const expected = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  if (!received || expected !== received) throw new Error("Invalid Telegram WebApp signature");
+  const tgUser = JSON.parse(params.get("user") || "{}");
+  return getUser(env, String(tgUser.id));
+}
+
+async function appState(env, request) {
+  const user = await verifyWebApp(env, request);
+  if (!user) throw new Error("User is not registered");
+  const pkg = await getUserPackage(env, user.telegram_id);
+  const credential = await getCredential(env, user.telegram_id);
+  const result = await all(env, `SELECT sandbox_id,label,status,expires_at,service_url FROM sandboxes WHERE owner_telegram_id=? ORDER BY created_at DESC`, user.telegram_id);
+  return new Response(JSON.stringify({ user: { name: user.first_name || "", username: user.username || "", role: user.role, status: user.status }, package: pkg ? { name: pkg.name, files: pkg.max_files_per_project, upload_bytes: pkg.max_upload_bytes } : null, credential: credential ? { fingerprint: credential.key_fingerprint, status: credential.status, validated_at: credential.last_validated_at } : null, sandboxes: result.results || [] }), { headers: { "content-type": "application/json" } });
+}
+
+async function appUpload(env, request) {
+  const user = await verifyWebApp(env, request);
+  if (!user || user.status !== "active") throw new Error("Active user access is required");
+  const pkg = await getUserPackage(env, user.telegram_id);
+  const sandbox = await first(env, `SELECT * FROM sandboxes WHERE owner_telegram_id=? AND status IN ('running','creating') ORDER BY created_at DESC LIMIT 1`, user.telegram_id);
+  const credential = await getCredential(env, user.telegram_id);
+  if (!pkg || !sandbox?.auth_token_ciphertext || !credential) throw new Error("Connect HopX and create a VPS first");
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File)) throw new Error("ZIP file is required");
+  if (file.size > Math.min(MAX_UPLOAD_BYTES, Number(pkg.max_upload_bytes))) throw new Error("File exceeds the active package limit");
+  const binary = await file.arrayBuffer();
+  const stagingKey = `staging/${user.telegram_id}/${sandbox.sandbox_id}/${crypto.randomUUID()}/${file.name}`;
+  if (env.UPLOADS) await env.UPLOADS.put(stagingKey, binary, { httpMetadata: { contentType: file.type || "application/zip" }, customMetadata: { userId: user.telegram_id, sandboxId: sandbox.sandbox_id } });
+  try {
+    const token = await decrypt(env, sandbox.auth_token_ciphertext);
+    const agent = sandbox.service_url || `https://${sandbox.sandbox_id}.hopx.dev`;
+    const headers = { Authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const base = `/workspace/akashvps/${user.telegram_id}`;
+    const write = await fetch(`${agent}/files/write`, { method: "POST", headers, body: JSON.stringify({ path: `${base}/upload.b64`, content: b64(binary) }) });
+    if (!write.ok) throw new Error("HopX file transfer failed");
+    const limit = Math.max(1, Number(pkg.max_files_per_project || 25));
+    const command = `mkdir -p ${base}/project && base64 -d ${base}/upload.b64 > ${base}/project/project.zip && count=$(unzip -Z1 ${base}/project/project.zip | wc -l) && test "$count" -le ${limit} || { echo "file limit exceeded"; exit 23; } && unzip -oq ${base}/project/project.zip -d ${base}/project && rm -f ${base}/upload.b64 ${base}/project/project.zip`;
+    const run = await fetch(`${agent}/commands/run`, { method: "POST", headers, body: JSON.stringify({ command, working_dir: "/workspace", timeout: 120 }) });
+    const result = await run.json().catch(() => ({}));
+    if (!run.ok || result.exit_code !== 0) throw new Error(result.stderr || "HopX extraction failed");
+    await audit(env, user.telegram_id, "webapp_upload", "success", sandbox.sandbox_id);
+    return new Response(JSON.stringify({ ok: true, message: "Transferred to HopX VPS. Temporary R2 object deleted." }), { headers: { "content-type": "application/json" } });
+  } finally {
+    if (env.UPLOADS) await env.UPLOADS.delete(stagingKey);
+  }
+}
+
 async function handleMessage(env, message) {
   const user = await upsertUser(env, message.from || { id: message.chat.id });
   const chatId = String(message.chat.id);
@@ -419,7 +478,7 @@ async function handleMessage(env, message) {
   if (text === "🖥 My VPS") return userVps(env, user);
   if (text === "📊 Usage") return usage(env, user);
   if (text === "🔑 HopX Key") return send(env, chatId, "🔑 Press the button below and send your complete HopX key in this private chat.", inline([[callback("🔑 Connect HopX API Key", "key:prompt")]]));
-  if (text === "📦 Deploy Project") return send(env, chatId, "📦 Send a ZIP document to upload it to your latest VPS.", mainMenu);
+  if (text === "📦 Deploy Project") return send(env, chatId, "📦 <b>PROJECT DEPLOYMENT</b>\n\nUse the Telegram Mini App for drag-and-drop upload, or send a ZIP document directly in this chat.", inline([[urlButton("📤 Open Drag-and-Drop Panel", "https://akashvps-admin-bot.axura.workers.dev/app")]]));
   if (text === "⌨️ Terminal") return send(env, chatId, "⌨️ Select your VPS first, then open its secure terminal session.", mainMenu);
   if (user.role === "owner" && text === "👥 Users") {
     const result = await all(env, `SELECT telegram_id, username, status, active FROM users ORDER BY created_at DESC LIMIT 20`);
@@ -438,6 +497,13 @@ async function handleMessage(env, message) {
 async function fetchHandler(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/health") return new Response(JSON.stringify({ ok: true, service: "akashvps-admin-bot", timestamp: now() }), { headers: { "content-type": "application/json" } });
+  if (url.pathname === "/app") return new Response(env.APP_HTML || "Mini App not configured", { headers: { "content-type": "text/html; charset=utf-8" } });
+  if (url.pathname === "/api/app/state" && request.method === "GET") {
+    try { return await appState(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 401, headers: { "content-type": "application/json" } }); }
+  }
+  if (url.pathname === "/api/app/upload" && request.method === "POST") {
+    try { return await appUpload(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "content-type": "application/json" } }); }
+  }
   if (request.method !== "POST" || url.pathname !== "/webhook") return new Response("Not found", { status: 404 });
   if (env.WEBHOOK_SECRET && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
   const update = await request.json();
