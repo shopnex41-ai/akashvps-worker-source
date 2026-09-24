@@ -547,6 +547,10 @@ async function handleMessage(env, message) {
   if (user.role === "owner" && text.startsWith("/package ")) return ownerPackageEdit(env, chatId, text.split(/\s+/).slice(1));
   if (user.role === "owner" && text === "/users") return ownerUsers(env, chatId);
   if (user.role === "owner" && text === "/audit") return ownerAudit(env, chatId);
+  if (text === "/create_vps") return createSandbox(env, user);
+  if (text === "/my_vps") return userVps(env, user);
+  if (text === "/usage") return usage(env, user);
+  if (text === "/deploy") return send(env, chatId, "📦 Open the Telegram Mini App for drag-and-drop deployment.", inline([[webAppButton("📤 Open Deployment Panel", "https://akashvps-admin-bot.axura.workers.dev/app")]]));
   if (text === "/start" || text === "/menu") {
     if (user.role === "owner") return send(env, chatId, ownerDashboard(), ownerMenu);
     if (user.status === "pending") return requestAccess(env, user);
