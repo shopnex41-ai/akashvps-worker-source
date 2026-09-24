@@ -433,6 +433,10 @@ async function handleMessage(env, message) {
 async function fetchHandler(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/health") return new Response(JSON.stringify({ ok: true, service: "akashvps-admin-bot", timestamp: now() }), { headers: { "content-type": "application/json" } });
+  if (url.pathname === "/diagnostics") {
+    const webhook = env.BOT_TOKEN ? await tg(env, "getWebhookInfo", {}) : { ok: false };
+    return new Response(JSON.stringify({ ok: true, bot_token_configured: Boolean(env.BOT_TOKEN), db_bound: Boolean(env.DB), r2_bound: Boolean(env.UPLOADS), webhook_ok: webhook.ok, webhook_url: webhook.result?.url || "", pending_updates: webhook.result?.pending_update_count || 0, last_error: webhook.result?.last_error_message || "" }), { headers: { "content-type": "application/json" } });
+  }
   if (request.method !== "POST" || url.pathname !== "/webhook") return new Response("Not found", { status: 404 });
   if (env.WEBHOOK_SECRET && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
   const update = await request.json();
