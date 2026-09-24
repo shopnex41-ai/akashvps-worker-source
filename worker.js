@@ -406,7 +406,7 @@ async function handleCallback(env, query) {
     if (action === "reject") return ownerReject(env, userId, value);
   }
   if (scope === "package" && action === "select") {
-    if (!user || user.status !== "accepted") return send(env, userId, "Your account is not ready for package activation.", mainMenu);
+    if (!user || !["accepted", "active"].includes(user.status)) return send(env, userId, "Your account must be accepted by the Owner before package activation.", mainMenu);
     const pkg = await getPackage(env, value);
     if (!pkg) return send(env, userId, "Package unavailable.", mainMenu);
     await db(env, `INSERT INTO package_orders(user_id, package_id, status, requested_at) VALUES(?,?,?,?)`, userId, pkg.id, "awaiting_activation", now());
