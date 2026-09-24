@@ -272,6 +272,39 @@ async function status(env, user, sandboxId) {
   }
 }
 
+async function stopSandbox(env, user, sandboxId) {
+  const sandbox = await first(env, `SELECT * FROM sandboxes WHERE sandbox_id=? AND owner_telegram_id=?`, sandboxId, user.telegram_id);
+  if (!sandbox) return send(env, user.telegram_id, "❌ VPS not found or not owned by you.", mainMenu);
+  const credential = await getCredential(env, user.telegram_id);
+  if (!credential) return send(env, user.telegram_id, "🔑 Connect your HopX key first.", mainMenu);
+  try {
+    const key = await decrypt(env, credential.key_ciphertext);
+    await providerRequest(`/v1/sandboxes/${encodeURIComponent(sandboxId)}/kill`, "POST", key);
+    await db(env, `UPDATE sandboxes SET status='stopped' WHERE sandbox_id=?`, sandboxId);
+    await audit(env, user.telegram_id, "stop_sandbox", "success", sandboxId);
+    return send(env, user.telegram_id, `🛑 <b>VPS STOPPED</b>\n\n${table("VPS", [["ID", sandboxId], ["Status", "STOPPED"], ["Data", "Preserved"]])}`, inline([[callback("🖥 My VPS", "vps:list"), callback("🚀 Create VPS", "vps:create")]]));
+  } catch (error) {
+    return send(env, user.telegram_id, `❌ Could not stop VPS: ${html(error.message)}`, mainMenu);
+  }
+}
+
+async function terminalSession(env, user, sandboxId) {
+  const sandbox = await first(env, `SELECT * FROM sandboxes WHERE sandbox_id=? AND owner_telegram_id=?`, sandboxId, user.telegram_id);
+  if (!sandbox) return send(env, user.telegram_id, "❌ VPS not found or not owned by you.", mainMenu);
+  if (!sandbox.service_url) return send(env, user.telegram_id, "⌨️ Terminal is unavailable until the provider returns a VPS URL.", mainMenu);
+  return send(env, user.telegram_id, `⌨️ <b>SECURE VPS ACCESS</b>\n\n${table("SESSION", [["VPS", sandbox.sandbox_id], ["Status", sandbox.status], ["Workspace", "/workspace/akashvps"]])}\n\nOpen the provider workspace from the secure button.`, inline([[urlButton("⌨️ Open VPS Workspace", sandbox.service_url)], [callback("📊 Refresh", `vps:status:${sandboxId}`), callback("🛑 Stop VPS", `vps:stop:${sandboxId}`)]]));
+}
+
+async function ownerKeys(env, chatId) {
+  const result = await all(env, `SELECT user_id, key_fingerprint, status, last_validated_at FROM provider_credentials ORDER BY updated_at DESC LIMIT 20`);
+  return send(env, chatId, `🔑 <b>HOPX KEY OVERVIEW</b>\n\n<pre>${html((result.results || []).map((x) => `${x.user_id}  ${x.key_fingerprint}  ${x.status}`).join("\n") || "No provider keys")}</pre>`, ownerMenu);
+}
+
+async function ownerAudit(env, chatId) {
+  const result = await all(env, `SELECT actor_telegram_id, action, result, created_at FROM audit_logs ORDER BY id DESC LIMIT 20`);
+  return send(env, chatId, `📜 <b>AUDIT LOGS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.created_at}  ${x.actor_telegram_id}  ${x.action}  ${x.result}`).join("\n") || "No audit events")}</pre>`, ownerMenu);
+}
+
 async function handleDocument(env, user, document, messageId) {
   const pkg = await getUserPackage(env, user.telegram_id);
   if (!pkg || user.status !== "active") return send(env, user.telegram_id, "📦 Activate a package before uploading a project.", inline([[callback("📦 Packages", "packages:view")]]));
@@ -287,16 +320,22 @@ async function handleDocument(env, user, document, messageId) {
   const encoded = b64(binary);
   const base = `/workspace/akashvps/${user.telegram_id}`;
   const agent = sandbox.service_url || `https://${sandbox.sandbox_id}.hopx.dev`;
-  const headers = { Authorization: `Bearer ${token}`, "content-type": "application/json" };
-  const write = await fetch(`${agent}/files/write`, { method: "POST", headers, body: JSON.stringify({ path: `${base}/upload.b64`, content: encoded }) });
-  if (!write.ok) return send(env, user.telegram_id, "❌ Project upload to VPS failed.", mainMenu);
-  const maxFiles = Math.max(1, Number(pkg.max_files_per_project || 25));
-  const command = `mkdir -p ${base}/project && base64 -d ${base}/upload.b64 > ${base}/project/project.zip && count=$(unzip -Z1 ${base}/project/project.zip | wc -l) && test "$count" -le ${maxFiles} || { echo "file limit exceeded: $count/${maxFiles}"; exit 23; } && unzip -oq ${base}/project/project.zip -d ${base}/project && rm -f ${base}/upload.b64 ${base}/project/project.zip`;
-  const run = await fetch(`${agent}/commands/run`, { method: "POST", headers, body: JSON.stringify({ command, working_dir: "/workspace", timeout: 120 }) });
-  const result = await run.json().catch(() => ({}));
-  await audit(env, user.telegram_id, "upload_project", run.ok && result.exit_code === 0 ? "success" : "failed", sandbox.sandbox_id);
-  if (!run.ok || result.exit_code !== 0) return send(env, user.telegram_id, `❌ <b>EXTRACT FAILED</b>\n\n<pre>${html((result.stderr || "Upload failed").slice(0, 3000))}</pre>`, mainMenu);
-  return send(env, user.telegram_id, `✅ <b>PROJECT UPLOADED</b>\n\n${table("DEPLOYMENT", [["File", document.file_name || "upload"], ["VPS", sandbox.sandbox_id], ["Path", `${base}/project`], ["Status", "READY TO START"]])}\n\nUse the terminal to install dependencies and start the project.`, inline([[callback("⌨️ Terminal", `terminal:open:${sandbox.sandbox_id}`), callback("📊 VPS Status", `vps:status:${sandbox.sandbox_id}`)]]));
+  const stagingKey = `staging/${user.telegram_id}/${sandbox.sandbox_id}/${crypto.randomUUID()}/${document.file_name || "project.zip"}`;
+  if (env.UPLOADS) await env.UPLOADS.put(stagingKey, binary, { httpMetadata: { contentType: document.mime_type || "application/zip" }, customMetadata: { userId: user.telegram_id, sandboxId: sandbox.sandbox_id } });
+  try {
+    const headers = { Authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const write = await fetch(`${agent}/files/write`, { method: "POST", headers, body: JSON.stringify({ path: `${base}/upload.b64`, content: encoded }) });
+    if (!write.ok) return send(env, user.telegram_id, "❌ Project upload to VPS failed.", mainMenu);
+    const maxFiles = Math.max(1, Number(pkg.max_files_per_project || 25));
+    const command = `mkdir -p ${base}/project && base64 -d ${base}/upload.b64 > ${base}/project/project.zip && count=$(unzip -Z1 ${base}/project/project.zip | wc -l) && test "$count" -le ${maxFiles} || { echo "file limit exceeded: $count/${maxFiles}"; exit 23; } && unzip -oq ${base}/project/project.zip -d ${base}/project && rm -f ${base}/upload.b64 ${base}/project/project.zip`;
+    const run = await fetch(`${agent}/commands/run`, { method: "POST", headers, body: JSON.stringify({ command, working_dir: "/workspace", timeout: 120 }) });
+    const result = await run.json().catch(() => ({}));
+    await audit(env, user.telegram_id, "upload_project", run.ok && result.exit_code === 0 ? "success" : "failed", sandbox.sandbox_id);
+    if (!run.ok || result.exit_code !== 0) return send(env, user.telegram_id, `❌ <b>EXTRACT FAILED</b>\n\n<pre>${html((result.stderr || "Upload failed").slice(0, 3000))}</pre>`, mainMenu);
+    return send(env, user.telegram_id, `✅ <b>PROJECT UPLOADED</b>\n\n${table("DEPLOYMENT", [["File", document.file_name || "upload"], ["VPS", sandbox.sandbox_id], ["Path", `${base}/project`], ["R2", "Temporary object removed"], ["Status", "READY TO START"]])}\n\nUse the secure workspace button to continue.`, inline([[callback("⌨️ Terminal", `terminal:open:${sandbox.sandbox_id}`), callback("📊 VPS Status", `vps:status:${sandbox.sandbox_id}`)]]));
+  } finally {
+    if (env.UPLOADS) await env.UPLOADS.delete(stagingKey);
+  }
 }
 
 async function handleCallback(env, query) {
@@ -336,11 +375,14 @@ async function handleCallback(env, query) {
   }
   if (scope === "packages" && action === "view") return showPackages(env, userId);
   if (scope === "vps" && action === "create") return createSandbox(env, user);
+  if (scope === "vps" && action === "list") return userVps(env, user);
   if (scope === "vps" && action === "status") return status(env, user, value);
+  if (scope === "vps" && action === "stop") return stopSandbox(env, user, value);
   if (scope === "deploy" && action === "help") return send(env, userId, "📦 Send a ZIP document to this chat. The bot will upload it to your latest active VPS workspace.", mainMenu);
-  if (scope === "terminal" && action === "open") return send(env, userId, "⌨️ Terminal gateway is being finalized. Use the VPS workspace upload and logs while the secure WebSocket session is enabled.", mainMenu);
+  if (scope === "terminal" && action === "open") return terminalSession(env, user, value);
   if (scope === "usage" && action === "me") return usage(env, user);
   if (scope === "key" && action === "help") return send(env, userId, "🔑 Send your HopX API key as a private message beginning with `hopx_live_`. It will be deleted after processing and never shown back.", mainMenu);
+  if (scope === "owner" && action === "contact") return send(env, userId, "📩 Your message has been queued for the Owner.", mainMenu);
   return send(env, userId, "Use the menu to continue.", user.role === "owner" ? ownerMenu : mainMenu);
 }
 
@@ -383,6 +425,8 @@ async function handleMessage(env, message) {
     const result = await all(env, `SELECT sandbox_id, owner_telegram_id, status, service_url FROM sandboxes ORDER BY created_at DESC LIMIT 20`);
     return send(env, chatId, `🖥 <b>ALL VPS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.sandbox_id}  ${x.owner_telegram_id}  ${x.status}`).join("\n") || "No VPS")}</pre>`, ownerMenu);
   }
+  if (user.role === "owner" && text === "🔑 HopX Keys") return ownerKeys(env, chatId);
+  if (user.role === "owner" && text === "📜 Audit Logs") return ownerAudit(env, chatId);
   return send(env, chatId, "Use the menu to continue.", user.role === "owner" ? ownerMenu : mainMenu);
 }
 
