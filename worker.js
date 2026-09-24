@@ -1,3 +1,5 @@
+import APP_HTML from "./app-html.js";
+
 const OWNER_DEFAULT = "8269594940";
 const HOPX_API = "https://api.hopx.dev";
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -497,7 +499,7 @@ async function handleMessage(env, message) {
 async function fetchHandler(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/health") return new Response(JSON.stringify({ ok: true, service: "akashvps-admin-bot", timestamp: now() }), { headers: { "content-type": "application/json" } });
-  if (url.pathname === "/app") return new Response(env.APP_HTML || "Mini App not configured", { headers: { "content-type": "text/html; charset=utf-8" } });
+  if (url.pathname === "/app") return new Response(APP_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
   if (url.pathname === "/api/app/state" && request.method === "GET") {
     try { return await appState(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 401, headers: { "content-type": "application/json" } }); }
   }
