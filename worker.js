@@ -49,6 +49,10 @@ function urlButton(text, url) {
   return { text, url };
 }
 
+function webAppButton(text, url) {
+  return { text, web_app: { url } };
+}
+
 async function tg(env, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -480,7 +484,7 @@ async function handleMessage(env, message) {
   if (text === "🖥 My VPS") return userVps(env, user);
   if (text === "📊 Usage") return usage(env, user);
   if (text === "🔑 HopX Key") return send(env, chatId, "🔑 Press the button below and send your complete HopX key in this private chat.", inline([[callback("🔑 Connect HopX API Key", "key:prompt")]]));
-  if (text === "📦 Deploy Project") return send(env, chatId, "📦 <b>PROJECT DEPLOYMENT</b>\n\nUse the Telegram Mini App for drag-and-drop upload, or send a ZIP document directly in this chat.", inline([[urlButton("📤 Open Drag-and-Drop Panel", "https://akashvps-admin-bot.axura.workers.dev/app")]]));
+  if (text === "📦 Deploy Project") return send(env, chatId, "📦 <b>PROJECT DEPLOYMENT</b>\n\nUse the Telegram Mini App for drag-and-drop upload, or send a ZIP document directly in this chat.", inline([[webAppButton("📤 Open Drag-and-Drop Panel", "https://akashvps-admin-bot.axura.workers.dev/app")]]));
   if (text === "⌨️ Terminal") return send(env, chatId, "⌨️ Select your VPS first, then open its secure terminal session.", mainMenu);
   if (user.role === "owner" && text === "👥 Users") {
     const result = await all(env, `SELECT telegram_id, username, status, active FROM users ORDER BY created_at DESC LIMIT 20`);
