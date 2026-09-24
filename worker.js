@@ -212,17 +212,20 @@ async function providerRequest(path, method, key, body) {
 }
 
 async function connectKey(env, user, key, messageId) {
-  if (!key.startsWith("hopx_live_")) return send(env, user.telegram_id, "❌ Invalid HopX key format. It should start with `hopx_live_`.", mainMenu);
+  if (!/^hopx_live_[A-Za-z0-9_.-]{20,}$/.test(key)) return send(env, user.telegram_id, "❌ Invalid HopX key format. Copy the complete key from console.hopx.dev.", mainMenu);
   const validation = await providerRequest("/v1/sandboxes", "GET", key);
+  const sandboxes = Array.isArray(validation) ? validation : (validation?.data || validation?.sandboxes || []);
   const encrypted = await encrypt(env, key);
   const fingerprint = `${key.slice(0, 10)}••••${key.slice(-4)}`;
   const previous = await first(env, `SELECT MAX(key_version) AS v FROM provider_credentials WHERE user_id=?`, user.telegram_id);
   const version = Number(previous?.v || 0) + 1;
   await db(env, `UPDATE provider_credentials SET status='revoked', updated_at=? WHERE user_id=? AND status='active'`, now(), user.telegram_id);
-  await db(env, `INSERT INTO provider_credentials(user_id, provider, key_version, key_ciphertext, key_fingerprint, organization_ref, status, last_validated_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, user.telegram_id, "hopx", version, encrypted, fingerprint, validation?.organization_id || null, "active", now(), now(), now());
+  const organization = sandboxes.find((x) => x.organization_id)?.organization_id || validation?.organization_id || null;
+  await db(env, `INSERT INTO provider_credentials(user_id, provider, key_version, key_ciphertext, key_fingerprint, organization_ref, status, last_validated_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, user.telegram_id, "hopx", version, encrypted, fingerprint, organization, "active", now(), now(), now());
   await audit(env, user.telegram_id, "hopx_key_connected", "validated");
   if (messageId) await deleteMessage(env, user.telegram_id, messageId);
-  return send(env, user.telegram_id, `✅ <b>HOPX KEY VERIFIED</b>\n\n${table("PROVIDER", [["Key", fingerprint], ["Status", "VERIFIED"], ["Version", version], ["Sandboxes", validation?.sandboxes?.length ?? "ready"]])}\n\nYour own HopX account is now connected.`, mainMenu);
+  const resources = sandboxes.find((x) => x.resources)?.resources || {};
+  return send(env, user.telegram_id, `✅ <b>HOPX ACCOUNT CONNECTED</b>\n\n${table("REAL PROVIDER SCAN", [["Provider", "HopX"], ["Key", fingerprint], ["Status", "VERIFIED"], ["Organization", organization || "provider"], ["Sandboxes", sandboxes.length], ["vCPU", resources.vcpu || "provider"], ["Memory", resources.memory_mb ? `${resources.memory_mb} MB` : "provider"], ["Disk", resources.disk_mb ? `${resources.disk_mb} MB` : "provider"]])}\n\nThe displayed account data comes from the real HopX API response.`, mainMenu);
 }
 
 async function createSandbox(env, user) {
@@ -381,7 +384,7 @@ async function handleCallback(env, query) {
   if (scope === "deploy" && action === "help") return send(env, userId, "📦 Send a ZIP document to this chat. The bot will upload it to your latest active VPS workspace.", mainMenu);
   if (scope === "terminal" && action === "open") return terminalSession(env, user, value);
   if (scope === "usage" && action === "me") return usage(env, user);
-  if (scope === "key" && action === "help") return send(env, userId, "🔑 Send your HopX API key as a private message beginning with `hopx_live_`. It will be deleted after processing and never shown back.", mainMenu);
+  if (scope === "key" && (action === "help" || action === "prompt")) return send(env, userId, "🔑 <b>SEND YOUR HOPX API KEY</b>\n\nCopy the complete key from console.hopx.dev and send it in this private chat. The bot will validate it with the real HopX API, store only an encrypted form, and delete the message after processing.", { force_reply: true, selective: true });
   if (scope === "owner" && action === "contact") return send(env, userId, "📩 Your message has been queued for the Owner.", mainMenu);
   return send(env, userId, "Use the menu to continue.", user.role === "owner" ? ownerMenu : mainMenu);
 }
@@ -406,6 +409,8 @@ async function handleMessage(env, message) {
     if (user.status === "pending") return requestAccess(env, user);
     if (user.status === "accepted") return showPackages(env, chatId);
     if (user.status !== "active") return send(env, chatId, "Your account is not active. Please contact the Owner.", mainMenu);
+    const credential = await getCredential(env, user.telegram_id);
+    if (!credential) return send(env, chatId, "🔑 <b>CONNECT YOUR HOPX ACCOUNT</b>\n\nPress the button below. The bot will ask for your real HopX API key, validate it against HopX, and show the provider account scan.", inline([[callback("🔑 Connect HopX API Key", "key:prompt")]]));
     return send(env, chatId, dashboard(user, await getUserPackage(env, user.telegram_id)), mainMenu);
   }
   if (user.role !== "owner" && user.status === "pending") return requestAccess(env, user);
@@ -413,7 +418,7 @@ async function handleMessage(env, message) {
   if (text === "🚀 Create VPS") return createSandbox(env, user);
   if (text === "🖥 My VPS") return userVps(env, user);
   if (text === "📊 Usage") return usage(env, user);
-  if (text === "🔑 HopX Key") return send(env, chatId, "🔑 Send your HopX key as a private message beginning with `hopx_live_`.", mainMenu);
+  if (text === "🔑 HopX Key") return send(env, chatId, "🔑 Press the button below and send your complete HopX key in this private chat.", inline([[callback("🔑 Connect HopX API Key", "key:prompt")]]));
   if (text === "📦 Deploy Project") return send(env, chatId, "📦 Send a ZIP document to upload it to your latest VPS.", mainMenu);
   if (text === "⌨️ Terminal") return send(env, chatId, "⌨️ Select your VPS first, then open its secure terminal session.", mainMenu);
   if (user.role === "owner" && text === "👥 Users") {
@@ -433,10 +438,6 @@ async function handleMessage(env, message) {
 async function fetchHandler(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/health") return new Response(JSON.stringify({ ok: true, service: "akashvps-admin-bot", timestamp: now() }), { headers: { "content-type": "application/json" } });
-  if (url.pathname === "/diagnostics") {
-    const webhook = env.BOT_TOKEN ? await tg(env, "getWebhookInfo", {}) : { ok: false };
-    return new Response(JSON.stringify({ ok: true, bot_token_configured: Boolean(env.BOT_TOKEN), db_bound: Boolean(env.DB), r2_bound: Boolean(env.UPLOADS), webhook_ok: webhook.ok, webhook_url: webhook.result?.url || "", pending_updates: webhook.result?.pending_update_count || 0, last_error: webhook.result?.last_error_message || "" }), { headers: { "content-type": "application/json" } });
-  }
   if (request.method !== "POST" || url.pathname !== "/webhook") return new Response("Not found", { status: 404 });
   if (env.WEBHOOK_SECRET && request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) return new Response("Forbidden", { status: 403 });
   const update = await request.json();
