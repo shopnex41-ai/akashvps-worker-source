@@ -314,6 +314,42 @@ async function ownerAudit(env, chatId) {
   return send(env, chatId, `📜 <b>AUDIT LOGS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.created_at}  ${x.actor_telegram_id}  ${x.action}  ${x.result}`).join("\n") || "No audit events")}</pre>`, ownerMenu);
 }
 
+async function ownerApprove(env, ownerId, targetId) {
+  const target = await getUser(env, targetId);
+  if (!target) return send(env, ownerId, `❌ User ${html(targetId)} was not found.`, ownerMenu);
+  await db(env, `UPDATE users SET status='accepted' WHERE telegram_id=?`, String(targetId));
+  await db(env, `UPDATE access_requests SET status='accepted', reviewed_at=? WHERE telegram_id=? AND status='pending'`, now(), String(targetId));
+  await audit(env, ownerId, "approve_user", "success");
+  await send(env, targetId, "✅ <b>ACCESS ACCEPTED</b>\n\nChoose a package to activate your account.", mainMenu);
+  await showPackages(env, targetId);
+  return send(env, ownerId, `✅ User ${html(targetId)} accepted. Package selector sent to the user.`, ownerMenu);
+}
+
+async function ownerReject(env, ownerId, targetId) {
+  const target = await getUser(env, targetId);
+  if (!target) return send(env, ownerId, `❌ User ${html(targetId)} was not found.`, ownerMenu);
+  await db(env, `UPDATE users SET status='suspended', active=0 WHERE telegram_id=?`, String(targetId));
+  await db(env, `UPDATE access_requests SET status='rejected', reviewed_at=? WHERE telegram_id=? AND status='pending'`, now(), String(targetId));
+  await audit(env, ownerId, "reject_user", "success");
+  await send(env, targetId, "❌ Your access request was not accepted.", mainMenu);
+  return send(env, ownerId, `✅ User ${html(targetId)} rejected.`, ownerMenu);
+}
+
+async function ownerPackageEdit(env, ownerId, args) {
+  const [id, files, uploadMb, cpu] = args;
+  if (!id || !files || !uploadMb) return send(env, ownerId, "Usage: /package <id> <max_files> <upload_mb> <cpu_policy>", ownerMenu);
+  await db(env, `UPDATE packages SET max_files_per_project=?, max_upload_bytes=?, cpu_policy=? WHERE id=?`, Number(files), Number(uploadMb) * 1024 * 1024, cpu || "provider-default", Number(id));
+  await audit(env, ownerId, "edit_package", `package:${id}`);
+  return send(env, ownerId, `✅ Package ${html(id)} updated from live D1.\nFiles: ${html(files)}\nUpload: ${html(uploadMb)} MB\nCPU: ${html(cpu || "provider-default")}`, ownerMenu);
+}
+
+async function ownerPackageDelete(env, ownerId, id) {
+  if (!id) return send(env, ownerId, "Usage: /package_delete <id>", ownerMenu);
+  await db(env, `UPDATE packages SET status='inactive' WHERE id=?`, Number(id));
+  await audit(env, ownerId, "delete_package", `package:${id}`);
+  return send(env, ownerId, `✅ Package ${html(id)} is now inactive in live D1.`, ownerMenu);
+}
+
 async function handleDocument(env, user, document, messageId) {
   const pkg = await getUserPackage(env, user.telegram_id);
   if (!pkg || user.status !== "active") return send(env, user.telegram_id, "📦 Activate a package before uploading a project.", inline([[callback("📦 Packages", "packages:view")]]));
@@ -356,18 +392,8 @@ async function handleCallback(env, query) {
   if (scope === "user" && user.role === "owner") {
     const target = await getUser(env, value);
     if (!target) return send(env, userId, "User not found.", ownerMenu);
-    if (action === "accept") {
-      await db(env, `UPDATE users SET status='accepted' WHERE telegram_id=?`, value);
-      await db(env, `UPDATE access_requests SET status='accepted', reviewed_at=? WHERE telegram_id=? AND status='pending'`, now(), value);
-      await send(env, value, "✅ <b>ACCESS ACCEPTED</b>\n\nChoose a package to activate your account.", mainMenu);
-      return showPackages(env, value);
-    }
-    if (action === "reject") {
-      await db(env, `UPDATE users SET status='suspended', active=0 WHERE telegram_id=?`, value);
-      await db(env, `UPDATE access_requests SET status='rejected', reviewed_at=? WHERE telegram_id=? AND status='pending'`, now(), value);
-      await send(env, value, "❌ Your access request was not accepted.", mainMenu);
-      return send(env, userId, `❌ User ${html(value)} rejected.`, ownerMenu);
-    }
+    if (action === "accept") return ownerApprove(env, userId, value);
+    if (action === "reject") return ownerReject(env, userId, value);
   }
   if (scope === "package" && action === "select") {
     if (!user || user.status !== "accepted") return send(env, userId, "Your account is not ready for package activation.", mainMenu);
@@ -381,6 +407,12 @@ async function handleCallback(env, query) {
     const target = action;
     await activateUser(env, target, Number(value), userId);
     return send(env, userId, `✅ Package activated for ${html(target)}.`, ownerMenu);
+  }
+  if (scope === "activation" && action === "reject" && user.role === "owner") {
+    await db(env, `UPDATE package_orders SET status='rejected', reviewed_by=? WHERE user_id=? AND status IN ('awaiting_activation','accepted')`, userId, value);
+    await audit(env, userId, "reject_package", `user:${value}`);
+    await send(env, value, "❌ Your package activation request was rejected by the Owner.", mainMenu);
+    return send(env, userId, `✅ Package request for ${html(value)} rejected.`, ownerMenu);
   }
   if (scope === "packages" && action === "view") return showPackages(env, userId);
   if (scope === "vps" && action === "create") return createSandbox(env, user);
@@ -469,6 +501,15 @@ async function handleMessage(env, message) {
     if (user.status !== "active") return send(env, chatId, "Your account must be active before connecting a HopX key.", mainMenu);
     try { return await connectKey(env, user, text, message.message_id); } catch (error) { return send(env, chatId, `❌ Key validation failed: ${html(error.message)}`, mainMenu); }
   }
+  if (user.role === "owner" && text.startsWith("/approve ")) return ownerApprove(env, chatId, text.split(/\s+/)[1]);
+  if (user.role === "owner" && text.startsWith("/reject ")) return ownerReject(env, chatId, text.split(/\s+/)[1]);
+  if (user.role === "owner" && text.startsWith("/package_delete ")) return ownerPackageDelete(env, chatId, text.split(/\s+/)[1]);
+  if (user.role === "owner" && text.startsWith("/package ")) return ownerPackageEdit(env, chatId, text.split(/\s+/).slice(1));
+  if (user.role === "owner" && text === "/users") {
+    const result = await all(env, `SELECT telegram_id, username, status, active FROM users ORDER BY created_at DESC LIMIT 50`);
+    return send(env, chatId, `👥 <b>USERS</b>\n\n<pre>${html((result.results || []).map((x) => `${x.telegram_id}  ${x.status}  @${x.username || "-"}`).join("\n") || "No users")}</pre>`, ownerMenu);
+  }
+  if (user.role === "owner" && text === "/audit") return ownerAudit(env, chatId);
   if (text === "/start" || text === "/menu") {
     if (user.role === "owner") return send(env, chatId, ownerDashboard(), ownerMenu);
     if (user.status === "pending") return requestAccess(env, user);
@@ -503,6 +544,13 @@ async function handleMessage(env, message) {
 async function fetchHandler(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/health") return new Response(JSON.stringify({ ok: true, service: "akashvps-admin-bot", timestamp: now() }), { headers: { "content-type": "application/json" } });
+  if (url.pathname === "/ops/reset-webhook" && request.method === "POST") {
+    if (!env.OPS_TOKEN || request.headers.get("X-Ops-Token") !== env.OPS_TOKEN) return new Response("Forbidden", { status: 403 });
+    const webhook = await tg(env, "setWebhook", { url: "https://akashvps-admin-bot.axura.workers.dev/webhook", secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message", "callback_query"] });
+    const info = await tg(env, "getWebhookInfo", {});
+    await send(env, env.OWNER_ID || OWNER_DEFAULT, `✅ <b>LIVE REBUILD TEST</b>\n\n${table("SYSTEM", [["Worker", "DEPLOYED"], ["Webhook set", webhook.ok ? "YES" : "NO"], ["Webhook URL", info.result?.url || "missing"], ["Pending updates", info.result?.pending_update_count || 0], ["D1", env.DB ? "BOUND" : "MISSING"], ["R2", env.UPLOADS ? "BOUND" : "MISSING"], ["Owner ID", env.OWNER_ID || OWNER_DEFAULT]])}`, ownerMenu);
+    return new Response(JSON.stringify({ ok: Boolean(webhook.ok), webhook_url: info.result?.url || "", pending_updates: info.result?.pending_update_count || 0 }), { headers: { "content-type": "application/json" } });
+  }
   if (url.pathname === "/app") return new Response(APP_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
   if (url.pathname === "/api/app/state" && request.method === "GET") {
     try { return await appState(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 401, headers: { "content-type": "application/json" } }); }
@@ -519,6 +567,7 @@ async function fetchHandler(request, env) {
   } catch (error) {
     console.error("update_failed", error?.message || error);
     const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+    await send(env, env.OWNER_ID || OWNER_DEFAULT, `🚨 <b>LIVE BOT ERROR</b>\n\n${table("UPDATE", [["Type", update.callback_query ? "callback" : "message"], ["Chat", chatId || "unknown"], ["Error", String(error?.message || error).slice(0, 500)]])}`, ownerMenu);
     if (chatId) await send(env, chatId, "⚠️ Temporary bot error. Your data was not deleted. Please retry.", mainMenu);
   }
   return new Response("ok");
