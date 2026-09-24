@@ -200,7 +200,7 @@ async function activateUser(env, userId, packageId, ownerId) {
   const pkg = await getPackage(env, packageId);
   if (!pkg) throw new Error("Package not found");
   await db(env, `UPDATE users SET status='active', active=1 WHERE telegram_id=?`, String(userId));
-  await db(env, `INSERT INTO user_packages(user_id, package_id, assigned_by, starts_at, status) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET package_id=excluded.package_id, assigned_by=excluded.assigned_by, starts_at=excluded.starts_at, status='active'`, String(userId), pkg.id, String(ownerId), now());
+  await db(env, `INSERT INTO user_packages(user_id, package_id, assigned_by, starts_at, status) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET package_id=excluded.package_id, assigned_by=excluded.assigned_by, starts_at=excluded.starts_at, status='active'`, String(userId), pkg.id, String(ownerId), now(), "active");
   await db(env, `UPDATE package_orders SET status='activated', activated_at=?, reviewed_by=? WHERE user_id=? AND status IN ('awaiting_activation','accepted')`, now(), String(ownerId), String(userId));
   await audit(env, ownerId, "activate_package", `package:${pkg.name}`);
   await send(env, userId, `✅ <b>PACKAGE ACTIVATED</b>\n\n${table("PLAN", [["Package", pkg.name], ["Files", pkg.max_files_per_project], ["Upload", `${Math.round(pkg.max_upload_bytes / 1024 / 1024)} MB`], ["CPU", pkg.cpu_policy || "provider"], ["Status", "ACTIVE"]])}\n\nYou can now connect your own HopX key and use the bot self-service.`, mainMenu);
