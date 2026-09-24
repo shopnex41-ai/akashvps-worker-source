@@ -16,6 +16,9 @@ const mainMenu = {
 
 const ownerMenu = {
   keyboard: [
+    ["🚀 Create VPS", "🖥 My VPS"],
+    ["📦 Deploy Project", "⌨️ Terminal"],
+    ["📊 Usage", "🔑 HopX Key"],
     ["👥 Users", "📨 Pending Users"],
     ["📦 Packages", "✏️ Edit Package"],
     ["🖥 All VPS", "🔑 HopX Keys"],
@@ -469,6 +472,25 @@ async function appState(env, request) {
   return new Response(JSON.stringify({ user: { name: user.first_name || "", username: user.username || "", role: user.role, status: user.status }, package: pkg ? { name: pkg.name, files: pkg.max_files_per_project, upload_bytes: pkg.max_upload_bytes } : null, credential: credential ? { fingerprint: credential.key_fingerprint, status: credential.status, validated_at: credential.last_validated_at } : null, sandboxes: result.results || [] }), { headers: { "content-type": "application/json" } });
 }
 
+async function appConnectKey(env, request) {
+  const user = await verifyWebApp(env, request);
+  if (!user || !["accepted", "active"].includes(user.status)) throw new Error("Owner approval and an active package are required");
+  const body = await request.json();
+  const key = String(body.key || "").trim();
+  if (!/^hopx_live_[A-Za-z0-9_.-]{20,}$/.test(key)) throw new Error("Invalid HopX key format");
+  const validation = await providerRequest("/v1/sandboxes", "GET", key);
+  const sandboxes = Array.isArray(validation) ? validation : (validation?.data || validation?.sandboxes || []);
+  const encrypted = await encrypt(env, key);
+  const fingerprint = `${key.slice(0, 10)}••••${key.slice(-4)}`;
+  const previous = await first(env, `SELECT MAX(key_version) AS v FROM provider_credentials WHERE user_id=?`, user.telegram_id);
+  const version = Number(previous?.v || 0) + 1;
+  const organization = sandboxes.find((x) => x.organization_id)?.organization_id || validation?.organization_id || null;
+  await db(env, `UPDATE provider_credentials SET status='revoked', updated_at=? WHERE user_id=? AND status='active'`, now(), user.telegram_id);
+  await db(env, `INSERT INTO provider_credentials(user_id, provider, key_version, key_ciphertext, key_fingerprint, organization_ref, status, last_validated_at, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, user.telegram_id, "hopx", version, encrypted, fingerprint, organization, "active", now(), now(), now());
+  await audit(env, user.telegram_id, "webapp_hopx_key_connected", "validated");
+  return new Response(JSON.stringify({ ok: true, fingerprint, organization, sandboxes: sandboxes.length, resources: sandboxes.find((x) => x.resources)?.resources || null }), { headers: { "content-type": "application/json" } });
+}
+
 async function appUpload(env, request) {
   const user = await verifyWebApp(env, request);
   if (!user || user.status !== "active") throw new Error("Active user access is required");
@@ -537,7 +559,7 @@ async function handleMessage(env, message) {
   if (text === "🚀 Create VPS") return createSandbox(env, user);
   if (text === "🖥 My VPS") return userVps(env, user);
   if (text === "📊 Usage") return usage(env, user);
-  if (text === "🔑 HopX Key") return send(env, chatId, "🔑 Press the button below and send your complete HopX key in this private chat.", inline([[callback("🔑 Connect HopX API Key", "key:prompt")]]));
+  if (text === "🔑 HopX Key") return send(env, chatId, "🔑 Press the button below and send your complete HopX key in this private chat.", inline([[callback("🔑 Connect HopX API Key", "key:prompt")]]), user.role === "owner" ? ownerMenu : mainMenu);
   if (text === "📦 Deploy Project") return send(env, chatId, "📦 <b>PROJECT DEPLOYMENT</b>\n\nUse the Telegram Mini App for drag-and-drop upload, or send a ZIP document directly in this chat.", inline([[webAppButton("📤 Open Drag-and-Drop Panel", "https://akashvps-admin-bot.axura.workers.dev/app")]]));
   if (text === "⌨️ Terminal") return send(env, chatId, "⌨️ Select your VPS first, then open its secure terminal session.", mainMenu);
   if (user.role === "owner" && text === "👥 Users") return ownerUsers(env, chatId);
@@ -569,6 +591,9 @@ async function fetchHandler(request, env) {
   if (url.pathname === "/app") return new Response(APP_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
   if (url.pathname === "/api/app/state" && request.method === "GET") {
     try { return await appState(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 401, headers: { "content-type": "application/json" } }); }
+  }
+  if (url.pathname === "/api/app/key" && request.method === "POST") {
+    try { return await appConnectKey(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "content-type": "application/json" } }); }
   }
   if (url.pathname === "/api/app/upload" && request.method === "POST") {
     try { return await appUpload(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 400, headers: { "content-type": "application/json" } }); }
