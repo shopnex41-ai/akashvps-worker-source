@@ -182,7 +182,7 @@ async function requestAccess(env, user) {
 async function showPackages(env, chatId) {
   const result = await all(env, `SELECT * FROM packages WHERE status='active' ORDER BY id`);
   const rows = result.results || [];
-  const text = `📦 <b>AVAILABLE PACKAGES</b>\n\n${rows.map((p) => `${table(p.name, [["Runtime", `${p.max_daily_runtime_minutes} min/day`], ["Commands", p.max_commands_per_day], ["Deploys", p.max_deployments_per_day], ["Upload", `${Math.round(p.max_upload_bytes / 1024 / 1024)} MB`]])}`).join("\n\n")}\nChoose a package to request activation.`;
+  const text = `📦 <b>AVAILABLE PACKAGES</b>\n\n${rows.map((p) => `${table(p.name, [["Files", p.max_files_per_project], ["Commands", p.max_commands_per_day], ["Deploys", p.max_deployments_per_day], ["Upload", `${Math.round(p.max_upload_bytes / 1024 / 1024)} MB`], ["CPU", p.cpu_policy || "provider"]])}`).join("\n\n")}\nThere is no bot-enforced date or runtime expiry. Provider limits still apply.`;
   const buttons = rows.map((p) => callback(`📦 ${p.name}`, `package:select:${p.id}`));
   return send(env, chatId, text, inline([buttons]));
 }
@@ -194,7 +194,7 @@ async function activateUser(env, userId, packageId, ownerId) {
   await db(env, `INSERT INTO user_packages(user_id, package_id, assigned_by, starts_at, status) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET package_id=excluded.package_id, assigned_by=excluded.assigned_by, starts_at=excluded.starts_at, status='active'`, String(userId), pkg.id, String(ownerId), now());
   await db(env, `UPDATE package_orders SET status='activated', activated_at=?, reviewed_by=? WHERE user_id=? AND status IN ('awaiting_activation','accepted')`, now(), String(ownerId), String(userId));
   await audit(env, ownerId, "activate_package", `package:${pkg.name}`);
-  await send(env, userId, `✅ <b>PACKAGE ACTIVATED</b>\n\n${table("PLAN", [["Package", pkg.name], ["Runtime", `${pkg.max_daily_runtime_minutes} min/day`], ["Deploys", pkg.max_deployments_per_day], ["Status", "ACTIVE"]])}\n\nYou can now connect your own HopX key and use the bot self-service.`, mainMenu);
+  await send(env, userId, `✅ <b>PACKAGE ACTIVATED</b>\n\n${table("PLAN", [["Package", pkg.name], ["Files", pkg.max_files_per_project], ["Upload", `${Math.round(pkg.max_upload_bytes / 1024 / 1024)} MB`], ["CPU", pkg.cpu_policy || "provider"], ["Status", "ACTIVE"]])}\n\nYou can now connect your own HopX key and use the bot self-service.`, mainMenu);
 }
 
 async function providerRequest(path, method, key, body) {
@@ -234,7 +234,7 @@ async function createSandbox(env, user) {
   if (Number(activeCount?.n || 0) >= Number(pkg.max_active_sandboxes)) return send(env, user.telegram_id, "⏸ Your package active VPS limit has been reached.", inline([[callback("📊 Usage", "usage:me")]]));
   const key = await decrypt(env, credential.key_ciphertext);
   try {
-    const sandbox = await providerRequest("/v1/sandboxes", "POST", key, { template_id: "73", timeout_seconds: Math.min(Number(pkg.max_runtime_minutes * 60), 21600) });
+    const sandbox = await providerRequest("/v1/sandboxes", "POST", key, { template_id: "73" });
     const id = sandbox.id;
     const token = sandbox.auth_token ? await encrypt(env, sandbox.auth_token) : null;
     await db(env, `INSERT INTO sandboxes(sandbox_id, label, owner_telegram_id, status, expires_at, service_url, auth_token_ciphertext, created_at) VALUES(?,?,?,?,?,?,?,?)`, id, `${pkg.name} workspace`, user.telegram_id, sandbox.status || "running", sandbox.token_expires_at || null, sandbox.public_host || sandbox.direct_url || null, token, now());
@@ -290,7 +290,8 @@ async function handleDocument(env, user, document, messageId) {
   const headers = { Authorization: `Bearer ${token}`, "content-type": "application/json" };
   const write = await fetch(`${agent}/files/write`, { method: "POST", headers, body: JSON.stringify({ path: `${base}/upload.b64`, content: encoded }) });
   if (!write.ok) return send(env, user.telegram_id, "❌ Project upload to VPS failed.", mainMenu);
-  const command = `mkdir -p ${base}/project && base64 -d ${base}/upload.b64 > ${base}/project/project.zip && unzip -oq ${base}/project/project.zip -d ${base}/project && rm -f ${base}/upload.b64 ${base}/project/project.zip`;
+  const maxFiles = Math.max(1, Number(pkg.max_files_per_project || 25));
+  const command = `mkdir -p ${base}/project && base64 -d ${base}/upload.b64 > ${base}/project/project.zip && count=$(unzip -Z1 ${base}/project/project.zip | wc -l) && test "$count" -le ${maxFiles} || { echo "file limit exceeded: $count/${maxFiles}"; exit 23; } && unzip -oq ${base}/project/project.zip -d ${base}/project && rm -f ${base}/upload.b64 ${base}/project/project.zip`;
   const run = await fetch(`${agent}/commands/run`, { method: "POST", headers, body: JSON.stringify({ command, working_dir: "/workspace", timeout: 120 }) });
   const result = await run.json().catch(() => ({}));
   await audit(env, user.telegram_id, "upload_project", run.ok && result.exit_code === 0 ? "success" : "failed", sandbox.sandbox_id);
@@ -346,7 +347,7 @@ async function handleCallback(env, query) {
 async function usage(env, user) {
   const pkg = await getUserPackage(env, user.telegram_id);
   const active = await first(env, `SELECT COUNT(*) AS n FROM sandboxes WHERE owner_telegram_id=? AND status IN ('creating','running')`, user.telegram_id);
-  return send(env, user.telegram_id, `📊 <b>YOUR USAGE</b>\n\n${table("USAGE", [["Package", pkg?.name || "none"], ["Active VPS", `${active?.n || 0} / ${pkg?.max_active_sandboxes || 0}`], ["Daily commands", pkg?.max_commands_per_day || 0], ["Daily deploys", pkg?.max_deployments_per_day || 0]])}`, mainMenu);
+  return send(env, user.telegram_id, `📊 <b>YOUR USAGE</b>\n\n${table("USAGE", [["Package", pkg?.name || "none"], ["Active VPS", `${active?.n || 0} / ${pkg?.max_active_sandboxes || 0}`], ["Files/project", pkg?.max_files_per_project || 0], ["Max upload", `${Math.round((pkg?.max_upload_bytes || 0) / 1024 / 1024)} MB`], ["CPU", pkg?.cpu_policy || "provider"]])}`, mainMenu);
 }
 
 async function handleMessage(env, message) {
