@@ -317,7 +317,7 @@ async function ownerAudit(env, chatId) {
 async function ownerUsers(env, chatId) {
   const result = await all(env, `SELECT telegram_id, username, status, active FROM users ORDER BY created_at DESC LIMIT 50`);
   const rows = result.results || [];
-  const buttons = rows.filter((x) => x.role !== "owner" && x.status === "pending").map((x) => [callback(`✅ Accept ${x.username ? `@${x.username}` : x.telegram_id}`, `user:accept:${x.telegram_id}`), callback("❌ Reject", `user:reject:${x.telegram_id}`)]);
+  const buttons = rows.filter((x) => x.telegram_id !== OWNER_DEFAULT && x.status === "pending").map((x) => [callback(`✅ Accept ${x.username ? `@${x.username}` : x.telegram_id}`, `user:accept:${x.telegram_id}`), callback("❌ Reject", `user:reject:${x.telegram_id}`)]);
   return send(env, chatId, `👥 <b>USERS</b>\n\n<pre>${html(rows.map((x) => `${x.telegram_id}  ${x.status}  @${x.username || "-"}`).join("\n") || "No users")}</pre>`, buttons.length ? inline(buttons) : ownerMenu);
 }
 
@@ -545,13 +545,6 @@ async function handleMessage(env, message) {
 async function fetchHandler(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/health") return new Response(JSON.stringify({ ok: true, service: "akashvps-admin-bot", timestamp: now() }), { headers: { "content-type": "application/json" } });
-  if (url.pathname === "/ops/reset-webhook" && request.method === "POST") {
-    if (!env.OPS_TOKEN || request.headers.get("X-Ops-Token") !== env.OPS_TOKEN) return new Response("Forbidden", { status: 403 });
-    const webhook = await tg(env, "setWebhook", { url: "https://akashvps-admin-bot.axura.workers.dev/webhook", secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message", "callback_query"] });
-    const info = await tg(env, "getWebhookInfo", {});
-    await send(env, env.OWNER_ID || OWNER_DEFAULT, `✅ <b>LIVE REBUILD TEST</b>\n\n${table("SYSTEM", [["Worker", "DEPLOYED"], ["Webhook set", webhook.ok ? "YES" : "NO"], ["Webhook URL", info.result?.url || "missing"], ["Pending updates", info.result?.pending_update_count || 0], ["D1", env.DB ? "BOUND" : "MISSING"], ["R2", env.UPLOADS ? "BOUND" : "MISSING"], ["Owner ID", env.OWNER_ID || OWNER_DEFAULT]])}`, ownerMenu);
-    return new Response(JSON.stringify({ ok: Boolean(webhook.ok), webhook_url: info.result?.url || "", pending_updates: info.result?.pending_update_count || 0 }), { headers: { "content-type": "application/json" } });
-  }
   if (url.pathname === "/app") return new Response(APP_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
   if (url.pathname === "/api/app/state" && request.method === "GET") {
     try { return await appState(env, request); } catch (error) { return new Response(JSON.stringify({ error: error.message }), { status: 401, headers: { "content-type": "application/json" } }); }
