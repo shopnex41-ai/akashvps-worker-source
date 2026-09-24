@@ -312,7 +312,7 @@ async function handleCallback(env, query) {
       await db(env, `UPDATE users SET status='accepted' WHERE telegram_id=?`, value);
       await db(env, `UPDATE access_requests SET status='accepted', reviewed_at=? WHERE telegram_id=? AND status='pending'`, now(), value);
       await send(env, value, "✅ <b>ACCESS ACCEPTED</b>\n\nChoose a package to activate your account.", mainMenu);
-      return showPackages(env, userId);
+      return showPackages(env, value);
     }
     if (action === "reject") {
       await db(env, `UPDATE users SET status='suspended', active=0 WHERE telegram_id=?`, value);
@@ -357,7 +357,7 @@ async function handleMessage(env, message) {
   if (message.document) return handleDocument(env, user, message.document, message.message_id);
   if (text.startsWith("hopx_live_")) {
     if (user.status !== "active") return send(env, chatId, "Your account must be active before connecting a HopX key.", mainMenu);
-    try { return connectKey(env, user, text, message.message_id); } catch (error) { return send(env, chatId, `❌ Key validation failed: ${html(error.message)}`, mainMenu); }
+    try { return await connectKey(env, user, text, message.message_id); } catch (error) { return send(env, chatId, `❌ Key validation failed: ${html(error.message)}`, mainMenu); }
   }
   if (text === "/start" || text === "/menu") {
     if (user.role === "owner") return send(env, chatId, ownerDashboard(), ownerMenu);
